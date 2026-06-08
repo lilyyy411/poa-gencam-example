@@ -1,0 +1,26 @@
+config {
+    /- camera "Some Camera"
+cadence "10s"
+max-exposure "2m"
+percentile 95.0
+max-bin 4
+/- gain 10.0
+target-val 30000.0
+target-uncertainty 2000.0
+target-temp -10.0
+save-fits #false
+save-png #true
+pix8b #false
+
+log {
+    max-files 10
+    rotation-time "15m"
+    temperature-monitor-period "1s"
+    dedup-period "15s"
+    }
+// Uncomment to set the roi as ranges of min..=max
+/- roi {
+    x 0 0
+    y 0 0
+    }
+}
