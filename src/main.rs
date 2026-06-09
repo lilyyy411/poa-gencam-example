@@ -38,10 +38,12 @@ use spdlog::{
 use crate::{
     cli::{Cli, Run, Subcommand},
     config::CameraConfig,
+    gps::Gps,
     util::SmolSleep,
 };
 mod cli;
 mod config;
+mod gps;
 mod util;
 
 fn init_logging(args: &Run, cfg: &CameraConfig) -> eyre::Result<Arc<Logger>> {
@@ -132,7 +134,6 @@ async fn do_run(
 ) -> eyre::Result<()> {
     debug!("{:>7}: {config:#?}", "Config");
     debug!("{:>7}: {args:#?}", "Args");
-
     // SAFETY: We only have one driver instance and the user must
     // make sure they aren't stupid and connect to the same camera twice
     let mut driver = unsafe { Driver::new() };
@@ -158,6 +159,13 @@ async fn do_run(
         .info_handle()
         .ok_or_eyre("Could not get info handle for camera")?;
 
+    let gps = config
+        .gps
+        .as_ref()
+        .cloned()
+        .map(Gps::new)
+        .transpose()
+        .wrap_err("Failed to connect to GPS serial")?;
     let temperature_monitor_task: Task<eyre::Result<()>> = {
         let running = running.clone();
         let task_run = task_run.clone();
@@ -223,7 +231,7 @@ async fn do_run(
         send,
     );
     smol::future::or(capture_task, temperature_monitor_task)
-        .or(save_loop(recv, config.clone(), args.clone()))
+        .or(save_loop(recv, config.clone(), args.clone(), gps))
         .await?;
 
     Ok(())
@@ -312,13 +320,14 @@ async fn save_loop(
     recv: Receiver<(GenericImageOwned, Timestamp)>,
     cfg: CameraConfig,
     run: Run,
+    gps: Option<Gps>,
 ) -> eyre::Result<()> {
     info!("Starting save loop");
     let prefix = run.save_dir.clone();
     // we don't need to pass the `task_run` atomicbool because when the capture task stops, the sender will hang up
     // the channel and error on recv
     loop {
-        let Ok((img, exp_start)) = recv.recv().await else {
+        let Ok((mut img, exp_start)) = recv.recv().await else {
             break Ok(());
         };
         let prefix = prefix.join(exp_start.strftime("%Y-%m-%d").to_string());
@@ -327,9 +336,37 @@ async fn save_loop(
                 .await
                 .wrap_err("Failed to create save dir")?;
         }
+        // Attach metadata from the GPS
+        if let Some(gps) = gps.as_ref()
+            && let Some(info) = gps.current_info()
+            && cfg.save_fits
+        {
+            debug!("Attaching GPS metadata to image");
+            let (lat, long, alt) = info.location();
+            // I think these are the right keys for long/lat.
+            _ = img.insert_key(
+                "SITELONG",
+                (long, "Longitude of the capture location (deg)"),
+            );
+            _ = img.insert_key("SITELAT", (lat, "Latitude of the capture location (deg)"));
+            // not a standard keyword. Just make up something that sounds legit
+            _ = img.insert_key(
+                "SITEALT",
+                (alt as f64, "Altitude of the capture location (m)"),
+            );
+            // not a standard keyword once again. Just make up something that sounds legit
+            _ = img.insert_key(
+                "SITEALTMSL",
+                (
+                    info.msl() as f64,
+                    "Altitude of the capture location above mean sea level (m)",
+                ),
+            );
+            // _ =
+        }
         let img = Arc::new(img);
         if cfg.save_fits {
-            let fits_file = prefix.join(exp_start.strftime("%H%M%S%.3f.fits").to_string());
+            let fits_file = prefix.join(exp_start.strftime("%H-%M-%S%.3f.fits").to_string());
             let fits_2 = fits_file.clone();
             // TODO: add location metadata and gps nonsense
             let img = img.clone();

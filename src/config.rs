@@ -63,6 +63,8 @@ pub struct CameraConfig {
     pub change_roi: Option<RoiConfig>,
     #[kdl(child)]
     pub log: LogConfig,
+    #[kdl(child)]
+    pub gps: Option<GpsConfig>,
 }
 #[derive(Debug, Clone, Copy, KdlDeserialize, KdlSerialize)]
 struct Range {
@@ -134,6 +136,19 @@ impl Default for CameraConfig {
                 temperature_period: DurationStr(Duration::from_secs(1).into()),
                 dedup_period: DurationStr(Duration::from_secs(15).into()),
             },
+            gps: Some(GpsConfig {
+                port: "/dev/ttyUSB0".into(),
+                baud_rate: 115200,
+            }),
         }
     }
+}
+
+#[derive(Debug, KdlDeserialize, KdlSerialize, Clone)]
+#[kdl(name = "gps")]
+pub struct GpsConfig {
+    #[kdl(child, unwrap_arg)]
+    pub port: String,
+    #[kdl(child, unwrap_arg)]
+    pub baud_rate: u32,
 }

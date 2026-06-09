@@ -816,6 +816,7 @@ dependencies = [
  "jiff",
  "larpa",
  "refimage",
+ "serialport",
  "smol",
  "spdlog-rs",
  "ublox-gps-tec",

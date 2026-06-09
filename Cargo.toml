@@ -32,6 +32,7 @@ image = "0.25.10"
 jiff = "0.2.28"
 larpa = "0.1.1"
 refimage = { version = "1.0.0-pre4", features = ["fitsio", "image"] }
+serialport = "4.9.0"
 # refimage = { version = "0.13.1", features = ["fitsio"] }
 smol = "2.0.2"
 spdlog-rs = "0.5.3"
