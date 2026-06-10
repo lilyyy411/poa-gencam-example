@@ -220,18 +220,19 @@ impl MockGps {
         // we can get away with being this crude since we know we're only going to be having a single active read.
         // We also don't even need to consider the read itself being successful. So basically this just makes it
         // periodic
-        match &mut *self
+        let mut last = self
             .data
             .read_start
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-        {
-            last @ &mut Some(read_start) if read_start.elapsed() > self.data.timeout => {
-                *last = None;
-                Err(std::io::Error::new(ErrorKind::TimedOut, "Do the thing"))
-            }
-            last @ (Some(_) | None) => Ok(_ = last.get_or_insert_with(Instant::now)),
+            .unwrap_or_else(PoisonError::into_inner);
+
+        if last.is_some_and(|read_start| read_start.elapsed() > self.data.timeout) {
+            *last = None;
+            return Err(std::io::Error::new(ErrorKind::TimedOut, "Do the thing"));
         }
+
+        last.get_or_insert_with(Instant::now);
+        Ok(())
     }
 }
 impl Read for MockGps {
