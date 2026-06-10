@@ -1,8 +1,6 @@
-use std::{str::FromStr, time::Duration};
 
-use clic_vdma::{MIN_FRAME_HEIGHT, MIN_FRAME_WIDTH};
 use club_kdl::{
-    FromKdlValue, KdlDeserialize, KdlIdentifier, KdlNode, KdlNodeExt, KdlSerialize, KdlValue,
+    FromKdlValue, KdlDeserialize, KdlIdentifier, KdlNodeExt, KdlValue,
     ToKdlValue,
 };
 use duration_string::DurationString;
@@ -211,8 +209,8 @@ pub enum SoftwareScalingAlg {
 #[derive(KdlDeserialize, Debug, Clone)]
 #[kdl(name = "scaler")]
 pub struct ScalerConfig {
-    #[kdl(child(name = "pre-crop"))]
-    pub pre_crop: Option<AnyNodeName<PreCrop>>,
+    #[kdl(child(name = "crop-mode"))]
+    pub crop_mode: Option<AnyNodeName<CropMode>>,
     #[kdl(child(name = "up"))]
     pub up: AnyNodeName<ScaleAlg>,
     #[kdl(child(name = "down"))]
@@ -220,15 +218,7 @@ pub struct ScalerConfig {
 }
 
 #[derive(KdlDeserialize, Debug, Clone)]
-pub enum PreCrop {
-    #[kdl(rename = "fit-square")]
-    FitSquare,
-    #[kdl(rename = "centered")]
-    Centered(Dims),
-}
-#[derive(KdlDeserialize, Debug, Clone)]
-pub enum PreCropKind {
-    /// Largest spanning square
-    #[kdl(rename = "center-square")]
-    CenterSquare,
+pub enum CropMode {
+    #[kdl(rename = "grid")]
+    Grid(Dims),
 }

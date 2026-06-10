@@ -80,7 +80,7 @@ fn main() -> eyre::Result<()> {
             if path == Path::new("--") {
                 println!("{cfg}")
             } else {
-                std::fs::write(path, &cfg)?;
+                std::fs::write(path, cfg)?;
             }
 
             Ok(())
@@ -356,12 +356,9 @@ async fn save_loop(
         {
             debug!("Attaching GPS metadata to image");
             let (lat, long, alt) = info.location();
-            // I think these are the right keys for long/lat.
             _ = img.insert_key("LON", (long, "Longitude of the capture location (deg)"));
             _ = img.insert_key("LAT", (lat, "Latitude of the capture location (deg)"));
-            // not a standard keyword. Just make up something that sounds legit
             _ = img.insert_key("ALT", (alt as f64, "Altitude of the capture location (m)"));
-            // not a standard keyword once again. Just make up something that sounds legit
             _ = img.insert_key(
                 "ALTMSL",
                 (

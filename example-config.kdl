@@ -14,7 +14,7 @@ target-val 30000.0
 target-uncertainty 2000.0
 target-temp -10.0
 // Whether to save FITS data
-save-fits #false
+save-fits #true
 // Whether to save PNG images
 save-png #true
 // Whether to use 8-bit color
@@ -61,11 +61,17 @@ gps {
 
 // Scaling settings for processing of the captured image
 scaler {
-    // The dimensions to crop the image to before saving.
-    // Can currently either be `fit-square` or `centered {dims}`
-    pre-crop fit-square
+    // The cropping mode for scaling. Only `grid` is accepted right now.
+    //
+    // - `grid` mode: Crops the image into a centered width:height aspect ratio region,
+    // and then splits that region into equal-sized square regions along the grid. Each of these
+    // regions are then saved as separate files, suffixed with a zero-based index
+    //
+    // If unset, no cropping happens
+    crop-mode grid 2 1
 
     down vpss 448 448 device="vpdn"
+    // The upscaling isn't used in capture. It is instead used on-demand
     up vpss 1024 1024 device="vpup"
     // You can also use software scaling algorithms (nearest, linear, cubic, gaussian, lanczos)
     /- down software 1024 1024 alg=nearest

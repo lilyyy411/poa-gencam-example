@@ -208,7 +208,6 @@ impl MockGps {
         stop: Arc<DummyData>,
     ) -> eyre::Result<()> {
         while !stop.stop.load(Ordering::Relaxed) {
-            // let mut rng = thread();
             let timeout =
                 timeout.saturating_sub(Duration::from_millis(rand::rng().random_range(0..64)));
             smol::Timer::after(timeout).await;
@@ -219,7 +218,8 @@ impl MockGps {
     }
     fn start_read_or_timeout(&mut self) -> std::io::Result<()> {
         // we can get away with being this crude since we know we're only going to be having a single active read.
-        // We also don't even need to consider the read itself being successful
+        // We also don't even need to consider the read itself being successful. So basically this just makes it
+        // periodic
         match &mut *self
             .data
             .read_start
@@ -228,13 +228,9 @@ impl MockGps {
         {
             last @ &mut Some(read_start) if read_start.elapsed() > self.data.timeout => {
                 *last = None;
-                Err(std::io::Error::new(ErrorKind::TimedOut, ""))
+                Err(std::io::Error::new(ErrorKind::TimedOut, "Do the thing"))
             }
-            Some(_) => Ok(()),
-            last @ None => {
-                *last = Some(Instant::now());
-                Ok(())
-            }
+            last @ (Some(_) | None) => Ok(_ = last.get_or_insert_with(Instant::now)),
         }
     }
 }
@@ -283,7 +279,7 @@ mod test {
 
     use crate::{
         config::{DurationStr, GpsConfig},
-        gps::{Gps, MOCK_MESSAGES, split_slice},
+        gps::{Gps, MOCK_MESSAGES},
     };
     #[test]
     fn mock_gps_same_data() {
