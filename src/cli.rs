@@ -16,8 +16,8 @@ pub struct Cli {
 #[derive(Command, Debug, Clone)]
 pub enum Subcommand {
     /// Captures images and saves them
-    Run(Run),
-    /// Write the default config file to a path. This is a bit buggy sometimes.
+    Capture(CaptureArgs),
+    /// Write an example config file
     WriteConfig {
         /// The path to write the default config to. If not provided or --, writes to stdout.
         #[larpa(default = "--")]
@@ -26,7 +26,7 @@ pub enum Subcommand {
 }
 
 #[derive(Command, Debug, Clone)]
-pub struct Run {
+pub struct CaptureArgs {
     /// The path to save images to
     #[larpa(name = ["-s", "--save-dir"], default = "data")]
     pub save_dir: PathBuf,

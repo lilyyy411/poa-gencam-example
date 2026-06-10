@@ -1,6 +1,10 @@
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
-use club_kdl::{FromKdlValue, KdlDeserialize, KdlSerialize, ToKdlValue};
+use clic_vdma::{MIN_FRAME_HEIGHT, MIN_FRAME_WIDTH};
+use club_kdl::{
+    FromKdlValue, KdlDeserialize, KdlIdentifier, KdlNode, KdlNodeExt, KdlSerialize, KdlValue,
+    ToKdlValue,
+};
 use duration_string::DurationString;
 use generic_camera::GenCamRoi;
 
@@ -32,8 +36,9 @@ impl ToKdlValue for &TargetVal {
         (self.0 * 65536.0).to_kdl_value()
     }
 }
-#[derive(Debug, Clone, KdlDeserialize, KdlSerialize)]
-#[kdl(name = "config")]
+#[derive(Debug, Clone, KdlDeserialize)]
+// #[kdl(name = "config")]
+#[kdl(document)]
 pub struct CameraConfig {
     #[kdl(child, unwrap_arg)]
     pub camera: Option<String>,
@@ -65,15 +70,18 @@ pub struct CameraConfig {
     pub log: LogConfig,
     #[kdl(child)]
     pub gps: Option<GpsConfig>,
+    #[kdl(child)]
+    pub scaler: ScalerConfig,
 }
-#[derive(Debug, Clone, Copy, KdlDeserialize, KdlSerialize)]
-struct Range {
+
+#[derive(Debug, Clone, Copy, KdlDeserialize)]
+pub struct Range {
     #[kdl(argument)]
-    min: u16,
+    pub min: u16,
     #[kdl(argument)]
-    max: u16,
+    pub max: u16,
 }
-#[derive(Debug, Clone, Copy, KdlDeserialize, KdlSerialize)]
+#[derive(Debug, Clone, Copy, KdlDeserialize)]
 #[kdl(name = "roi")]
 pub struct RoiConfig {
     #[kdl(child(name = "x"))]
@@ -101,7 +109,7 @@ impl RoiConfig {
         }
     }
 }
-#[derive(Debug, KdlDeserialize, KdlSerialize, Clone)]
+#[derive(Debug, KdlDeserialize, Clone)]
 #[kdl(name = "log")]
 pub struct LogConfig {
     #[kdl(child, unwrap_arg, rename = "max-files")]
@@ -114,41 +122,113 @@ pub struct LogConfig {
     pub dedup_period: DurationStr,
     // pub
 }
-impl Default for CameraConfig {
-    fn default() -> Self {
-        Self {
-            camera: None, // connect to the first camera
-            cadence: DurationStr(Duration::from_secs(10).into()),
-            max_exposure: DurationStr(Duration::from_secs(120).into()),
-            percentile: 95.0,
-            max_bin: 4,
-            target_val: TargetVal(30000.0 / 65536.0),
-            target_uncertainty: TargetVal(2000.0 / 65536.0),
-            gain: None, // use the camera default
-            target_temp: -10.0,
-            save_fits: false,
-            save_png: true,
-            pix8b: false,
-            change_roi: None,
-            log: LogConfig {
-                max_files: 10,
-                rotation_time: DurationStr(Duration::from_mins(15).into()),
-                temperature_period: DurationStr(Duration::from_secs(1).into()),
-                dedup_period: DurationStr(Duration::from_secs(15).into()),
-            },
-            gps: Some(GpsConfig {
-                port: "/dev/ttyUSB0".into(),
-                baud_rate: 115200,
-            }),
-        }
-    }
+
+#[derive(Debug, KdlDeserialize, Copy, Clone)]
+pub struct Dims {
+    #[kdl(argument)]
+    pub width: u32,
+    #[kdl(argument)]
+    pub height: u32,
 }
 
-#[derive(Debug, KdlDeserialize, KdlSerialize, Clone)]
+#[derive(Debug, KdlDeserialize, Clone)]
 #[kdl(name = "gps")]
 pub struct GpsConfig {
     #[kdl(child, unwrap_arg)]
     pub port: String,
     #[kdl(child, unwrap_arg)]
     pub baud_rate: u32,
+    #[kdl(child, unwrap_arg)]
+    pub timeout: DurationStr,
+}
+#[derive(Debug, Clone, KdlDeserialize)]
+pub enum ScaleAlg {
+    #[kdl(rename = "vpss")]
+    Vpss {
+        #[kdl(property)]
+        device: String,
+        #[kdl(flatten)]
+        dims: Dims,
+    },
+    #[kdl(rename = "software")]
+    Software {
+        #[kdl(flatten)]
+        dims: Dims,
+        #[kdl(property)]
+        alg: SoftwareScalingAlg,
+    },
+}
+
+/// A wrapper for a deserializable struct to make it deserializable with any node name.
+/// This is used because `club_kdl`'s data enums have insane behavior of requiring specific node
+/// names for each variant instead of being able to have both behaviors. This make it impossible
+/// to use data enums with
+#[derive(Clone, Copy, Debug, Hash)]
+pub struct AnyNodeName<T>(pub T);
+impl<'a, T: for<'b> KdlDeserialize<'b>> KdlDeserialize<'a> for AnyNodeName<T> {
+    fn from_kdl_node(node: &'a club_kdl::KdlNode) -> club_kdl::Result<Self> {
+        let mut node = node.clone();
+        let Some(name) = node.remove(0) else {
+            return Err(club_kdl::Error::MissingArgument(0));
+        };
+        let KdlValue::String(name) = name.value() else {
+            return Err(club_kdl::Error::InvalidValue {
+                field: "0",
+                message: "Expected identifier".into(),
+            });
+        };
+        node.set_name(name.parse::<KdlIdentifier>().map_err(|e| {
+            club_kdl::Error::InvalidValue {
+                field: "0",
+                message: e.to_string(),
+            }
+        })?);
+        Ok(Self(T::from_kdl_node(&node)?))
+    }
+    fn kdl_matches_any_node() -> bool {
+        true
+    }
+}
+
+#[derive(KdlDeserialize, Debug, Clone, Copy)]
+pub enum SoftwareScalingAlg {
+    /// Nearest Neighbor
+    Nearest,
+
+    /// Linear Filter
+    Linear,
+
+    /// Cubic Filter
+    Cubic,
+
+    /// Gaussian Filter
+    Gaussian,
+
+    /// Lanczos with window 3
+    Lanczos,
+}
+
+#[derive(KdlDeserialize, Debug, Clone)]
+#[kdl(name = "scaler")]
+pub struct ScalerConfig {
+    #[kdl(child(name = "pre-crop"))]
+    pub pre_crop: Option<AnyNodeName<PreCrop>>,
+    #[kdl(child(name = "up"))]
+    pub up: AnyNodeName<ScaleAlg>,
+    #[kdl(child(name = "down"))]
+    pub down: AnyNodeName<ScaleAlg>,
+}
+
+#[derive(KdlDeserialize, Debug, Clone)]
+pub enum PreCrop {
+    #[kdl(rename = "fit-square")]
+    FitSquare,
+    #[kdl(rename = "centered")]
+    Centered(Dims),
+}
+#[derive(KdlDeserialize, Debug, Clone)]
+pub enum PreCropKind {
+    /// Largest spanning square
+    #[kdl(rename = "center-square")]
+    CenterSquare,
 }

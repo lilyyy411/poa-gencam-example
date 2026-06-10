@@ -10,11 +10,12 @@ use std::{
 };
 
 use duration_string::DurationString;
-use eyre::{Context, ContextCompat, OptionExt, eyre};
+use eyre::{Context, ContextCompat, eyre};
 use generic_camera::{
     AnyGenCam, CaptureAsync, GenCamCtrl, GenCamDescriptor, GenCamDriver, GenCamError,
     GenCamPixelBpp, PropertyValue, Sleep,
     controls::{AnalogCtrl, DeviceCtrl, ExposureCtrl, SensorCtrl},
+    dummy::GenCamDriverDummy,
 };
 use generic_camera_player_one::Driver;
 use image::{DynamicImage, imageops::FilterType};
@@ -36,7 +37,7 @@ use spdlog::{
 };
 
 use crate::{
-    cli::{Cli, Run, Subcommand},
+    cli::{CaptureArgs, Cli, Subcommand},
     config::CameraConfig,
     gps::Gps,
     util::SmolSleep,
@@ -44,9 +45,10 @@ use crate::{
 mod cli;
 mod config;
 mod gps;
+mod scaler;
 mod util;
 
-fn init_logging(args: &Run, cfg: &CameraConfig) -> eyre::Result<Arc<Logger>> {
+fn init_logging(args: &CaptureArgs, cfg: &CameraConfig) -> eyre::Result<Arc<Logger>> {
     spdlog::init_env_level_from("LOG")?;
     let log_sink = RotatingFileSink::builder()
         .base_path(args.log_dir.join("log.log"))
@@ -74,7 +76,7 @@ fn main() -> eyre::Result<()> {
     let cli = Cli::from_args();
     match cli.subcommand {
         Subcommand::WriteConfig { path } => {
-            let cfg = club_kdl::to_string_pretty(&CameraConfig::default())?;
+            let cfg = include_str!("../example-config.kdl");
             if path == Path::new("--") {
                 println!("{cfg}")
             } else {
@@ -83,11 +85,11 @@ fn main() -> eyre::Result<()> {
 
             Ok(())
         }
-        Subcommand::Run(args) => start_run(args),
+        Subcommand::Capture(args) => start_run(args),
     }
 }
 
-fn start_run(args: Run) -> eyre::Result<()> {
+fn start_run(args: CaptureArgs) -> eyre::Result<()> {
     let config: CameraConfig = club_kdl::from_str(&std::fs::read_to_string(&args.config)?)?;
     let logger = init_logging(&args, &config)?;
 
@@ -127,7 +129,7 @@ fn start_run(args: Run) -> eyre::Result<()> {
 }
 
 async fn do_run(
-    args: Run,
+    args: CaptureArgs,
     config: CameraConfig,
     logger: Arc<Logger>,
     running: Arc<AtomicBool>,
@@ -155,10 +157,6 @@ async fn do_run(
 
     let task_run = Arc::new(AtomicBool::new(true));
 
-    let info = camera
-        .info_handle()
-        .ok_or_eyre("Could not get info handle for camera")?;
-
     let gps = config
         .gps
         .as_ref()
@@ -166,38 +164,44 @@ async fn do_run(
         .map(Gps::new)
         .transpose()
         .wrap_err("Failed to connect to GPS serial")?;
-    let temperature_monitor_task: Task<eyre::Result<()>> = {
-        let running = running.clone();
-        let task_run = task_run.clone();
-        let monitor_period = <_>::from(config.log.temperature_period.0);
-        let logger = logger.clone();
-        smol::spawn(async move {
-            info!("Starting temperature monitor task");
-            while task_run.load(Ordering::Relaxed) && running.load(Ordering::Relaxed) {
-                smol::Timer::after(monitor_period).await;
-                let (temp, _) = info
-                    .get_property(GenCamCtrl::Device(DeviceCtrl::Temperature))
-                    .unwrap_or((PropertyValue::from(-273.15f64), false));
-                let cooler_power = info
-                    .get_property(GenCamCtrl::Device(DeviceCtrl::CoolerPower))
-                    .unwrap_or((PropertyValue::from(-1i64), false))
-                    .0
-                    .try_into()
-                    .unwrap_or(-1i64);
-                let temp = temp.try_into().unwrap_or(-273.15f64);
+    let temp_task = if let Some(info) = camera.info_handle() {
+        let temperature_monitor_task: Task<eyre::Result<()>> = {
+            let running = running.clone();
+            let task_run = task_run.clone();
+            let monitor_period = <_>::from(config.log.temperature_period.0);
+            let logger = logger.clone();
+            smol::spawn(async move {
+                info!("Starting temperature monitor task");
+                while task_run.load(Ordering::Relaxed) && running.load(Ordering::Relaxed) {
+                    smol::Timer::after(monitor_period).await;
+                    let (temp, _) = info
+                        .get_property(GenCamCtrl::Device(DeviceCtrl::Temperature))
+                        .unwrap_or((PropertyValue::from(-273.15f64), false));
+                    let cooler_power = info
+                        .get_property(GenCamCtrl::Device(DeviceCtrl::CoolerPower))
+                        .unwrap_or((PropertyValue::from(-1i64), false))
+                        .0
+                        .try_into()
+                        .unwrap_or(-1i64);
+                    let temp = temp.try_into().unwrap_or(-273.15f64);
 
-                info!("Camera temperature: {temp:>+05.1} C, Cooler Power: {cooler_power:>3}%");
-                if !logger.should_log(Level::Debug) {
-                    _ = stdout().write_all(b"\r");
+                    info!("Camera temperature: {temp:>+05.1} C, Cooler Power: {cooler_power:>3}%");
+                    if !logger.should_log(Level::Debug) {
+                        _ = stdout().write_all(b"\r");
+                    }
                 }
-            }
-            if let Err(e) = info.cancel_capture() {
-                error!("Failed to cancel capture: {e}");
-            }
-            info!("Exiting temperature monitor task");
-            Ok(())
-        })
+                if let Err(e) = info.cancel_capture() {
+                    error!("Failed to cancel capture: {e}");
+                }
+                info!("Exiting temperature monitor task");
+                Ok(())
+            })
+        };
+        Some(temperature_monitor_task)
+    } else {
+        None
     };
+
     let props = camera.list_properties();
     let exp_prop = props
         .get(&GenCamCtrl::Exposure(ExposureCtrl::ExposureTime))
@@ -230,7 +234,14 @@ async fn do_run(
         task_run.clone(),
         send,
     );
-    smol::future::or(capture_task, temperature_monitor_task)
+    let temp_task = async move {
+        if let Some(temp_task) = temp_task {
+            temp_task.await
+        } else {
+            smol::future::pending().await
+        }
+    };
+    smol::future::or(capture_task, temp_task)
         .or(save_loop(recv, config.clone(), args.clone(), gps))
         .await?;
 
@@ -267,15 +278,45 @@ async fn capture_loop(
                 continue;
             }
         };
-        let Some(exp) = img.get_exposure() else {
-            warn!("No exposure value found for image");
-            continue;
-        };
         let img = GenericImageOwned::from(img);
-        let mut img2 = img.clone();
+        'a: {
+            if let Some(exp) = img.get_exposure() {
+                let mut img = img.clone();
+                // for a significant amount of time. It does <[T]>::sort on a multi-megabyte slice when it should be doing
+                // a quickselect.
+                let Ok((opt_exp, _)) = smol::unblock(move || {
+                    img.to_luma()
+                        .map_err(|e| eyre!("Failed to convert image to luma: {e}"))?;
+                    img.calc_opt_exp(&exp_ctrl, exp, 1)
+                        .map_err(|e| eyre!("Failed to calculate optimal exposure: {e}"))
+                })
+                .await
+                // we need to make sure we don't block the thread since calculating a new optimal exposure may block the thread
+                else {
+                    warn!("Failed to calculate optimal exposure. Will not update exposure.");
+                    break 'a;
+                };
+                // Fuzzy go br
+                if opt_exp.abs_diff(exp) > Duration::from_micros(500) {
+                    if let Err(e) =
+                        camera.set_property(ExposureCtrl::ExposureTime.into(), &opt_exp.into())
+                    {
+                        error!("Failed to update exposure time: {e}")
+                    } else {
+                        info!(
+                            "\nExposure changed from {:.6} to {:.6}",
+                            DurationString::new(exp),
+                            DurationString::new(opt_exp)
+                        )
+                    }
+                }
+            } else {
+                warn!("No exposure value found for image");
+            }
+        }
 
         let now = Instant::now();
-        let should_save = last_save.is_some_and(|x| now - x > config.cadence.0);
+        let should_save = last_save.is_none_or(|x| now - x > config.cadence.0);
         if should_save {
             debug!("Sending image to the save task to be saved.");
             if let Err(e) = save_sender.try_send((img, exp_start)) {
@@ -284,34 +325,6 @@ async fn capture_loop(
             }
             last_save = Some(now);
         }
-
-        // we need to make sure we don't block the thread since calculating a new optimal exposure may block the thread
-        // for a significant amount of time. It does <[T]>::sort on a multi-megabyte slice when it should be doing
-        // a quickselect.
-        let Ok((opt_exp, _)) = smol::unblock(move || {
-            img2.to_luma()
-                .map_err(|e| eyre!("Failed to convert image to luma: {e}"))?;
-            img2.calc_opt_exp(&exp_ctrl, exp, 1)
-                .map_err(|e| eyre!("{e}"))
-        })
-        .await
-        else {
-            warn!("Failed to calculate optimal exposure. Will not update exposure.");
-            continue;
-        };
-        // Fuzzy go br
-        if opt_exp.abs_diff(exp) > Duration::from_micros(500) {
-            if let Err(e) = camera.set_property(ExposureCtrl::ExposureTime.into(), &opt_exp.into())
-            {
-                error!("Failed to update exposure time: {e}")
-            } else {
-                info!(
-                    "\nExposure changed from {:.6} to {:.6}",
-                    DurationString::new(exp),
-                    DurationString::new(opt_exp)
-                )
-            }
-        }
     }
     Ok(())
 }
@@ -319,7 +332,7 @@ async fn capture_loop(
 async fn save_loop(
     recv: Receiver<(GenericImageOwned, Timestamp)>,
     cfg: CameraConfig,
-    run: Run,
+    run: CaptureArgs,
     gps: Option<Gps>,
 ) -> eyre::Result<()> {
     info!("Starting save loop");
@@ -344,19 +357,13 @@ async fn save_loop(
             debug!("Attaching GPS metadata to image");
             let (lat, long, alt) = info.location();
             // I think these are the right keys for long/lat.
-            _ = img.insert_key(
-                "SITELONG",
-                (long, "Longitude of the capture location (deg)"),
-            );
-            _ = img.insert_key("SITELAT", (lat, "Latitude of the capture location (deg)"));
+            _ = img.insert_key("LON", (long, "Longitude of the capture location (deg)"));
+            _ = img.insert_key("LAT", (lat, "Latitude of the capture location (deg)"));
             // not a standard keyword. Just make up something that sounds legit
-            _ = img.insert_key(
-                "SITEALT",
-                (alt as f64, "Altitude of the capture location (m)"),
-            );
+            _ = img.insert_key("ALT", (alt as f64, "Altitude of the capture location (m)"));
             // not a standard keyword once again. Just make up something that sounds legit
             _ = img.insert_key(
-                "SITEALTMSL",
+                "ALTMSL",
                 (
                     info.msl() as f64,
                     "Altitude of the capture location above mean sea level (m)",
@@ -392,11 +399,12 @@ async fn save_loop(
             img
         };
         if cfg.save_png {
-            let dimg = DynamicImage::try_from((*img).clone()).expect("Error converting image");
+            let dimg = DynamicImage::try_from((*img).clone())
+                .map_err(|e| eyre!("Failed to convert image: {e}"))?;
             smol::unblock(move || {
                 // TODO: use the other scaler
-                let dimg = dimg.resize(1024, 1024, FilterType::Nearest);
-                let out_path = prefix.join(exp_start.strftime("%H%M%S%.3f.png").to_string());
+                let dimg = dimg.resize_exact(1024, 1024, FilterType::Nearest);
+                let out_path = prefix.join(exp_start.strftime("%H-%M-%S%.3f.png").to_string());
                 _ = dimg.save(&out_path).inspect_err(|e| {
                     warn!("Failed to save PNG image to {}: {e}", out_path.display())
                 });
@@ -517,6 +525,10 @@ fn connect_camera(
     );
     let desc = if let Some(name) = config.camera.as_deref() {
         info!("Searching for camera with name {name}");
+        if name == "dummy" {
+            let cam = GenCamDriverDummy {}.connect_first_device()?;
+            return Ok(Some(cam));
+        }
         let descs = driver.list_devices()?;
         log_descriptors(logger, &descs);
         let selected = descs

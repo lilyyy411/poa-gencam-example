@@ -1,31 +1,72 @@
-config {
-
-/- camera "Some Camera"
-cadence "10s"
+// The camera to use. If not provided, connects to the first available camera.
+camera "dummy"
+// The time between each capture
+cadence "5s"
+// The maximum exposure time
 max-exposure "2m"
+// Optimimum exposure time parameters...
 percentile 95.0
 max-bin 4
+
 /- gain 10.0
+
 target-val 30000.0
 target-uncertainty 2000.0
 target-temp -10.0
+// Whether to save FITS data
 save-fits #false
+// Whether to save PNG images
 save-png #true
+// Whether to use 8-bit color
 pix8b #false
 
+// Log settings
 log {
+    // The maximum number of log files there should be in the log directory
     max-files 10
+    // The amount of time it takes to rotate between log files
     rotation-time "15m"
+    // The amount of time between temperature log messages
     temperature-monitor-period "1s"
+    // The amount of time that that needs to pass for duplicate log messages to not
+    // be considered duplicate.
+    //
+    // By default, when duplicate log messages are emitted, it will only emit the message once
+    // and then an indicator on how many duplicate records there were. You can disable such filtering
+    // by setting to 0, but this can make
     dedup-period "15s"
-    }
-// Uncomment to set the roi as ranges of min..=max
+}
+
+// The region of interest in pixel space represented as min..max on the x and y axes.
+// The actual value on the camera may be different than the one you suggest due to hardware limitations.
+// POA cameras require the width to be a multiple of 4 and height a multiple of 2 and typically will round
+// down in cases of mismatch
+//
+// A warning will be logged if there is such a mismatch and it is recommended to immediately fix the config
+// file on mismatch to ensure consistency, but I'll
 /- roi {
     x 0 0
     y 0 0
-    }
-gps {
-    port "/dev/ttyUSB0"
-    baud_rate 115200
 }
+
+// Settings for an optional U-Blox GPS to connect to for attaching location metadata to captured image
+gps {
+    // The port to connect to
+    port "dummy"
+    // The baud rate
+    baud_rate 115200
+    // The read timeout
+    timeout "500ms"
+}
+
+// Scaling settings for processing of the captured image
+scaler {
+    // The dimensions to crop the image to before saving.
+    // Can currently either be `fit-square` or `centered {dims}`
+    pre-crop fit-square
+
+    down vpss 448 448 device="vpdn"
+    up vpss 1024 1024 device="vpup"
+    // You can also use software scaling algorithms (nearest, linear, cubic, gaussian, lanczos)
+    /- down software 1024 1024 alg=nearest
 }
