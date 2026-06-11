@@ -1,8 +1,4 @@
-
-use club_kdl::{
-    FromKdlValue, KdlDeserialize, KdlIdentifier, KdlNodeExt, KdlValue,
-    ToKdlValue,
-};
+use club_kdl::{FromKdlValue, KdlDeserialize, KdlIdentifier, KdlValue, ToKdlValue};
 use duration_string::DurationString;
 use generic_camera::GenCamRoi;
 
@@ -37,7 +33,7 @@ impl ToKdlValue for &TargetVal {
 #[derive(Debug, Clone, KdlDeserialize)]
 // #[kdl(name = "config")]
 #[kdl(document)]
-pub struct CameraConfig {
+pub struct Config {
     #[kdl(child, unwrap_arg)]
     pub camera: Option<String>,
     #[kdl(child, unwrap_arg)]
@@ -69,7 +65,9 @@ pub struct CameraConfig {
     #[kdl(child)]
     pub gps: Option<GpsConfig>,
     #[kdl(child)]
-    pub scaler: ScalerConfig,
+    pub scaler: Option<AnyNodeName<ScalerConfig>>,
+    #[kdl(child, unwrap_arg, name = "image-format")]
+    pub image_format: String,
 }
 
 #[derive(Debug, Clone, Copy, KdlDeserialize)]
@@ -139,22 +137,10 @@ pub struct GpsConfig {
     #[kdl(child, unwrap_arg)]
     pub timeout: DurationStr,
 }
-#[derive(Debug, Clone, KdlDeserialize)]
-pub enum ScaleAlg {
-    #[kdl(rename = "vpss")]
-    Vpss {
-        #[kdl(property)]
-        device: String,
-        #[kdl(flatten)]
-        dims: Dims,
-    },
-    #[kdl(rename = "software")]
-    Software {
-        #[kdl(flatten)]
-        dims: Dims,
-        #[kdl(property)]
-        alg: SoftwareScalingAlg,
-    },
+#[derive(Debug, Clone, Copy, KdlDeserialize)]
+pub enum ScaleDims {
+    Absolute(Dims),
+    Input,
 }
 
 /// A wrapper for a deserializable struct to make it deserializable with any node name.
@@ -208,13 +194,43 @@ pub enum SoftwareScalingAlg {
 
 #[derive(KdlDeserialize, Debug, Clone)]
 #[kdl(name = "scaler")]
-pub struct ScalerConfig {
-    #[kdl(child(name = "crop-mode"))]
-    pub crop_mode: Option<AnyNodeName<CropMode>>,
-    #[kdl(child(name = "up"))]
-    pub up: AnyNodeName<ScaleAlg>,
-    #[kdl(child(name = "down"))]
-    pub down: AnyNodeName<ScaleAlg>,
+pub enum ScalerConfig {
+    Vpss {
+        #[kdl(child, unwrap_arg, rename = "vdma-device")]
+        vdma_device: String,
+        #[kdl(child(name = "crop-mode"))]
+        crop_mode: Option<AnyNodeName<CropMode>>,
+        #[kdl(child)]
+        down: VpssScaling,
+        #[kdl(child)]
+        up: Option<VpssScaling>,
+    },
+    Software {
+        #[kdl(child(name = "crop-mode"))]
+        crop_mode: Option<AnyNodeName<CropMode>>,
+        #[kdl(child)]
+        down: SoftwareScaling,
+        #[kdl(child)]
+        up: Option<SoftwareScaling>,
+    },
+}
+
+#[derive(KdlDeserialize, Clone, Debug)]
+pub struct VpssScaling {
+    #[kdl(property)]
+    pub device: String,
+    #[kdl(flatten)]
+    pub dims: AnyNodeName<ScaleDims>,
+    #[kdl(property, default)]
+    pub nn: bool,
+}
+
+#[derive(KdlDeserialize, Clone, Copy, Debug)]
+pub struct SoftwareScaling {
+    #[kdl(flatten)]
+    pub dims: AnyNodeName<ScaleDims>,
+    #[kdl(property)]
+    pub alg: SoftwareScalingAlg,
 }
 
 #[derive(KdlDeserialize, Debug, Clone)]

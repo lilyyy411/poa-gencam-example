@@ -217,9 +217,9 @@ impl MockGps {
         Ok(())
     }
     fn start_read_or_timeout(&mut self) -> std::io::Result<()> {
-        // we can get away with being this crude since we know we're only going to be having a single active read.
+        // We can get away with being this crude since we know we're only going to be having a single active read.
         // We also don't even need to consider the read itself being successful. So basically this just makes it
-        // periodic
+        // periodic. Good enough for a mock gps.
         let mut last = self
             .data
             .read_start
@@ -290,14 +290,11 @@ mod test {
                 Gps::mock(Duration::from_millis(100)).expect("Failed to make mock gps");
 
             let _task = smol::spawn(async move {
-                // if you write from the same task, the write will never go through because
-                // the message is larger than the internal pipe capacity (i think)
                 let message = MOCK_MESSAGES[0];
                 writer
                     .write_all(message)
                     .await
                     .expect("Failed to write to pipe");
-                // writer.flush().await.unwrap();
                 smol::Timer::after(Duration::from_millis(100)).await;
                 writer
                     .write_all(MOCK_MESSAGES[1])
@@ -305,7 +302,6 @@ mod test {
                     .expect("Failed to write to pipe");
                 smol::Timer::after(Duration::from_millis(200)).await;
             });
-            // writer.flush().await.expect("failed to flush");
 
             smol::Timer::after(Duration::from_millis(200)).await;
             let location = gps.current_info().expect("Did not get data").location();

@@ -1,16 +1,18 @@
 use std::{
+    convert::identity,
     io::{Write, stdout},
     path::Path,
     process::exit,
     sync::{
-        Arc,
+        Arc, LazyLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use duration_string::DurationString;
 use eyre::{Context, ContextCompat, eyre};
+use futures_util::StreamExt;
 use generic_camera::{
     AnyGenCam, CaptureAsync, GenCamCtrl, GenCamDescriptor, GenCamDriver, GenCamError,
     GenCamPixelBpp, PropertyValue, Sleep,
@@ -18,17 +20,19 @@ use generic_camera::{
     dummy::GenCamDriverDummy,
 };
 use generic_camera_player_one::Driver;
-use image::{DynamicImage, imageops::FilterType};
+use image::{DynamicImage, ImageReader};
 use jiff::Timestamp;
 use larpa::Command;
 use refimage::{
-    CalcOptExp, Debayer, DemosaicMethod, FitsCompression, FitsWrite, GenericImageOwned, ImageProps,
-    OptimumExposure, OptimumExposureBuilder, ToLuma,
+    CalcOptExp, Debayer, DemosaicMethod, DynamicImageRef, FitsCompression, FitsWrite,
+    GenericImageOwned, GenericImageRef, ImageOwned, ImageProps, ImageRef, OptimumExposure,
+    OptimumExposureBuilder, ToLuma,
 };
 use smol::{
     Task,
     channel::{Receiver, Sender},
     future::FutureExt,
+    stream,
 };
 use spdlog::{
     Level, Logger, debug, error, info, log,
@@ -38,8 +42,9 @@ use spdlog::{
 
 use crate::{
     cli::{CaptureArgs, Cli, Subcommand},
-    config::CameraConfig,
+    config::Config,
     gps::Gps,
+    scaler::Scaler,
     util::SmolSleep,
 };
 mod cli;
@@ -48,7 +53,7 @@ mod gps;
 mod scaler;
 mod util;
 
-fn init_logging(args: &CaptureArgs, cfg: &CameraConfig) -> eyre::Result<Arc<Logger>> {
+fn init_logging(args: &CaptureArgs, cfg: &Config) -> eyre::Result<Arc<Logger>> {
     spdlog::init_env_level_from("LOG")?;
     let log_sink = RotatingFileSink::builder()
         .base_path(args.log_dir.join("log.log"))
@@ -90,7 +95,7 @@ fn main() -> eyre::Result<()> {
 }
 
 fn start_run(args: CaptureArgs) -> eyre::Result<()> {
-    let config: CameraConfig = club_kdl::from_str(&std::fs::read_to_string(&args.config)?)?;
+    let config: Config = club_kdl::from_str(&std::fs::read_to_string(&args.config)?)?;
     let logger = init_logging(&args, &config)?;
 
     let running = Arc::new(AtomicBool::new(true));
@@ -130,7 +135,7 @@ fn start_run(args: CaptureArgs) -> eyre::Result<()> {
 
 async fn do_run(
     args: CaptureArgs,
-    config: CameraConfig,
+    config: Config,
     logger: Arc<Logger>,
     running: Arc<AtomicBool>,
 ) -> eyre::Result<()> {
@@ -164,6 +169,13 @@ async fn do_run(
         .map(Gps::new)
         .transpose()
         .wrap_err("Failed to connect to GPS serial")?;
+    let scaler = config
+        .scaler
+        .as_ref()
+        .cloned()
+        .map(|x| Scaler::new(x.0))
+        .transpose()
+        .wrap_err("Failed to initialize scaler")?;
     let temp_task = if let Some(info) = camera.info_handle() {
         let temperature_monitor_task: Task<eyre::Result<()>> = {
             let running = running.clone();
@@ -242,23 +254,44 @@ async fn do_run(
         }
     };
     smol::future::or(capture_task, temp_task)
-        .or(save_loop(recv, config.clone(), args.clone(), gps))
+        .or(save_loop(recv, config.clone(), args.clone(), gps, scaler))
         .await?;
 
     Ok(())
 }
 async fn capture_loop(
     camera: &mut AnyGenCam,
-    config: CameraConfig,
+    config: Config,
     exp_ctrl: OptimumExposure,
     running: Arc<AtomicBool>,
     task_run: Arc<AtomicBool>,
     save_sender: Sender<(GenericImageOwned, Timestamp)>,
 ) -> eyre::Result<()> {
     let mut last_save = None::<Instant>;
+    let mut fixed_image_data = if config.camera.unwrap_or_default() == "dummy-fixed" {
+        Some(MOCK_IMAGE.as_slice_u8().unwrap().to_owned())
+    } else {
+        None
+    };
     while running.load(Ordering::Relaxed) && task_run.load(Ordering::Relaxed) {
         let exp_start = jiff::Timestamp::now();
-        let res = flatten_fut(camera.capture_async(SmolSleep)).await;
+        let res = if let Some(ref mut fixed) = fixed_image_data {
+            smol::Timer::after(Duration::from_secs(1)).await;
+            Ok(GenericImageRef::new(
+                SystemTime::UNIX_EPOCH,
+                DynamicImageRef::U8(
+                    ImageRef::new(
+                        fixed,
+                        MOCK_IMAGE.width(),
+                        MOCK_IMAGE.height(),
+                        refimage::ColorSpace::Rgb,
+                    )
+                    .unwrap(),
+                ),
+            ))
+        } else {
+            flatten_fut(camera.capture_async(SmolSleep)).await
+        };
         let img = match res {
             Ok(img) => img,
             Err(GenCamError::TimedOut) => {
@@ -331,9 +364,10 @@ async fn capture_loop(
 
 async fn save_loop(
     recv: Receiver<(GenericImageOwned, Timestamp)>,
-    cfg: CameraConfig,
+    cfg: Config,
     run: CaptureArgs,
     gps: Option<Gps>,
+    mut scaler: Option<Scaler>,
 ) -> eyre::Result<()> {
     info!("Starting save loop");
     let prefix = run.save_dir.clone();
@@ -396,17 +430,36 @@ async fn save_loop(
             img
         };
         if cfg.save_png {
+            let time_string = exp_start.strftime("%H-%M-%S%.3f").to_string();
             let dimg = DynamicImage::try_from((*img).clone())
                 .map_err(|e| eyre!("Failed to convert image: {e}"))?;
-            smol::unblock(move || {
-                // TODO: use the other scaler
-                let dimg = dimg.resize_exact(1024, 1024, FilterType::Nearest);
-                let out_path = prefix.join(exp_start.strftime("%H-%M-%S%.3f.png").to_string());
-                _ = dimg.save(&out_path).inspect_err(|e| {
-                    warn!("Failed to save PNG image to {}: {e}", out_path.display())
-                });
-            })
-            .await
+            if let Some(scaler) = scaler.as_mut() {
+                let outputs = scaler.run(dimg).await?;
+                let image_format = cfg.image_format.clone();
+                stream::iter(outputs.into_iter().enumerate().map(|(i, img)| {
+                    let out_path = prefix
+                        .join(format!("{time_string}-part-{i}"))
+                        .with_added_extension(&image_format);
+                    smol::unblock(move || {
+                        _ = img.save(&out_path).inspect_err(|e| {
+                            warn!("Failed to save image to {}: {e}", out_path.display())
+                        });
+                    })
+                }))
+                .for_each_concurrent(scaler.recommended_concurrency() as usize, identity)
+                .await;
+            } else {
+                let image_format = cfg.image_format.clone();
+                smol::unblock(move || {
+                    // TODO: use the other scaler
+                    // let dimg = dimg.resize_exact(1024, 1024, FilterType::Nearest);
+                    let out_path = prefix.join(time_string).with_added_extension(&image_format);
+                    _ = dimg.save(&out_path).inspect_err(|e| {
+                        warn!("Failed to save image to {}: {e}", out_path.display())
+                    });
+                })
+                .await
+            }
         }
     }
 }
@@ -416,7 +469,7 @@ async fn flatten_fut<T, E>(f: Result<impl Future<Output = Result<T, E>>, E>) -> 
         Err(e) => Err(e),
     }
 }
-fn setup_camera(camera: &mut AnyGenCam, config: &CameraConfig) -> eyre::Result<()> {
+fn setup_camera(camera: &mut AnyGenCam, config: &Config) -> eyre::Result<()> {
     info!("====== Setting up camera ======");
     let is_color = if let Some(color_sensor_prop) = camera
         .info()
@@ -510,9 +563,28 @@ fn setup_camera(camera: &mut AnyGenCam, config: &CameraConfig) -> eyre::Result<(
     info!("Setup complete!");
     Ok(())
 }
+static MOCK_IMAGE: LazyLock<GenericImageOwned> = LazyLock::new(|| {
+    let img = ImageReader::new(std::io::Cursor::new(include_bytes!(
+        "../mock-data/image.jpg"
+    )))
+    .with_guessed_format()
+    .unwrap()
+    .decode()
+    .unwrap()
+    .into_rgb8();
+    let width = img.width();
+    let height = img.height();
+    let cspace = refimage::ColorSpace::Rgb;
+    GenericImageOwned::new(
+        SystemTime::UNIX_EPOCH,
+        ImageOwned::from_owned(img.into_raw(), width as _, height as _, cspace)
+            .unwrap()
+            .into(),
+    )
+});
 fn connect_camera(
     driver: &mut Driver,
-    config: &CameraConfig,
+    config: &Config,
     logger: &Arc<Logger>,
 ) -> eyre::Result<Option<AnyGenCam>> {
     info!("======== Choosing camera  ========");
@@ -522,7 +594,7 @@ fn connect_camera(
     );
     let desc = if let Some(name) = config.camera.as_deref() {
         info!("Searching for camera with name {name}");
-        if name == "dummy" {
+        if name == "dummy" || name == "dummy-fixed" {
             let cam = GenCamDriverDummy {}.connect_first_device()?;
             return Ok(Some(cam));
         }

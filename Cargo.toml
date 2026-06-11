@@ -6,18 +6,19 @@ edition = "2024"
 [dependencies]
 clic-vdma = {
   git = "https://github.com/sunipkm/protostar-kria-linux.git",
-  rev = "54cc9c2908fe69b0dcd476652b6740989c733b3e",
+  rev = "0ab99049fe732113cf0bf78e0016da8aa20a4c2d",
   version = "0.1.0"
 }
 clic-vpss = {
   git = "https://github.com/sunipkm/protostar-kria-linux.git",
-  rev = "54cc9c2908fe69b0dcd476652b6740989c733b3e",
+  rev = "0ab99049fe732113cf0bf78e0016da8aa20a4c2d",
   version = "0.1.0"
 }
 club-kdl = "0.11.1"
 ctrlc = "3.5.2"
 duration-string = "0.5.3"
 eyre = "0.6.12"
+futures-util = "0.3.32"
 generic-camera = {
   git = "https://github.com/lilyyy411/generic_camera.git",
   rev = "39ccc221790fec42b183ba3576a1c7ebe4484aed",
@@ -43,3 +44,6 @@ ublox-gps-tec = {
   rev = "66ca0626165f96c2b92b46a2e3ab15323a08002f",
   version = "0.0.1"
 }
+
+[dev-dependencies]
+proptest = "1.11.0"

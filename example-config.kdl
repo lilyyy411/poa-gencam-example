@@ -1,5 +1,6 @@
 // The camera to use. If not provided, connects to the first available camera.
-camera "dummy"
+camera "dummy-fixed"
+// fixed_input_image_path "mock-data/image.jpg"
 // The time between each capture
 cadence "5s"
 // The maximum exposure time
@@ -14,11 +15,14 @@ target-val 30000.0
 target-uncertainty 2000.0
 target-temp -10.0
 // Whether to save FITS data
-save-fits #true
+save-fits #false
 // Whether to save PNG images
 save-png #true
 // Whether to use 8-bit color
 pix8b #false
+
+// The output image format
+image-format "jpg"
 
 // Log settings
 log {
@@ -58,21 +62,32 @@ gps {
     // The read timeout
     timeout "500ms"
 }
-
 // Scaling settings for processing of the captured image
-scaler {
+/- scaler vpss {
+    // The vdma device to use
+    vdma-device "/dev/clic_vdma"
     // The cropping mode for scaling. Only `grid` is accepted right now.
     //
-    // - `grid` mode: Crops the image into a centered width:height aspect ratio region,
-    // and then splits that region into equal-sized square regions along the grid. Each of these
-    // regions are then saved as separate files, suffixed with a zero-based index
+    // - `grid`: Crops the image into a centered width:height aspect ratio region,
+    // and then splits that region into approximately equal-sized square regions along the grid. Each of these
+    // regions are then saved as separate files, suffixed with a zero-based index. The dimensions
+    // used by the upscaler and downscaler are *per grid cell* and not for the entire image.
     //
     // If unset, no cropping happens
     crop-mode grid 2 1
+    // These dimensions are per-grid cell
+    down absolute 448 448 device="vpdn"
+    // input means to upscale to the original input grid size.
+    up input device="vpup" nn=#true
+}
 
-    down vpss 448 448 device="vpdn"
-    // The upscaling isn't used in capture. It is instead used on-demand
-    up vpss 1024 1024 device="vpup"
-    // You can also use software scaling algorithms (nearest, linear, cubic, gaussian, lanczos)
-    /- down software 1024 1024 alg=nearest
+// You can also use software scaling algorithms (nearest, linear, cubic, gaussian, lanczos).
+// The upscaler might not be that useful because it doesn't produce a mask.
+//
+// You can also omit the upscaler
+scaler software {
+    crop-mode grid 2 1
+    // These dimensions are per-grid cell
+    down absolute 448 448 alg=nearest
+    up input alg=lanczos
 }
